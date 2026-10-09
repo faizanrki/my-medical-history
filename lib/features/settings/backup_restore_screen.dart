@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
@@ -5,21 +6,33 @@ import '../../core/theme/app_colors.dart';
 import '../../data/app_database.dart';
 import '../../services/google_drive_backup_service.dart';
 
-// ============================================
+// ==========================================
 // MY MEDICAL HISTORY
-// GOOGLE DRIVE BACKUP & RESTORE SCREEN
-// ============================================
+// STEP 46 - BACKUP DIALOG LIFECYCLE FIX
+// ==========================================
 
 class BackupRestoreScreen extends StatefulWidget {
-  const BackupRestoreScreen({super.key});
+  final GoogleSignInAccount? initialAccount;
+
+  final List<MedicalDriveBackupFile> initialBackups;
+
+  const BackupRestoreScreen({
+    super.key,
+    this.initialAccount,
+    this.initialBackups =
+    const <MedicalDriveBackupFile>[],
+  });
 
   @override
-  State<BackupRestoreScreen> createState() => _BackupRestoreScreenState();
+  State<BackupRestoreScreen> createState() =>
+      _BackupRestoreScreenState();
 }
 
-class _BackupRestoreScreenState extends State<BackupRestoreScreen>
+class _BackupRestoreScreenState
+    extends State<BackupRestoreScreen>
     with WidgetsBindingObserver {
-  final GoogleDriveBackupService _service = GoogleDriveBackupService.instance;
+  final GoogleDriveBackupService _service =
+      GoogleDriveBackupService.instance;
 
   late final int _generation;
 
@@ -33,9 +46,17 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
 
   int _request = 0;
 
-  bool get _sessionValid => AppDatabase.instance.isSessionCurrent(_generation);
+  bool get _sessionValid =>
+      AppDatabase.instance.isSessionCurrent(
+        _generation,
+      );
 
-  bool get _connected => _account != null && _sessionValid;
+  bool get _connected =>
+      _account != null && _sessionValid;
+
+  // ========================================
+  // INITIALIZE
+  // ========================================
 
   @override
   void initState() {
@@ -43,12 +64,37 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
 
     WidgetsBinding.instance.addObserver(this);
 
-    _generation = AppDatabase.instance.sessionGeneration;
+    _generation =
+        AppDatabase.instance.sessionGeneration;
+
+    if (_sessionValid &&
+        widget.initialAccount != null) {
+      _account = widget.initialAccount;
+
+      _backups = List<MedicalDriveBackupFile>.of(
+        widget.initialBackups,
+      );
+
+      _status =
+      'Google Drive connected. '
+          '${_backups.length} backup(s) available.';
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback(
+            (_) {
+          if (mounted && _sessionValid) {
+            _connect(requestPermission: false);
+          }
+        },
+      );
+    }
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && mounted) {
+  void didChangeAppLifecycleState(
+      AppLifecycleState state,
+      ) {
+    if (state == AppLifecycleState.resumed &&
+        mounted) {
       setState(() {});
     }
   }
@@ -61,33 +107,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
   }
 
   // ========================================
-  // GET EXISTING GOOGLE ACCOUNT
-  // ========================================
-
-  Future<GoogleSignInAccount> _getGoogleAccount() async {
-    final attempt = GoogleSignIn.instance.attemptLightweightAuthentication();
-
-    if (attempt == null) {
-      throw StateError(
-        'No Google account is available. '
-        'Please sign in again.',
-      );
-    }
-
-    final account = await attempt;
-
-    if (account == null || !_sessionValid) {
-      throw StateError(
-        'Your Google account is unavailable '
-        'or the session has changed.',
-      );
-    }
-
-    return account;
-  }
-
-  // ========================================
-  // DISPLAY SAFE ERRORS
+  // SAFE ERROR MESSAGE
   // ========================================
 
   String _errorText(Object error) {
@@ -99,255 +119,254 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
       return error.message.toString();
     }
 
-    return 'The operation could not be '
-        'confirmed. Check the Google account '
-        'and internet connection.';
+    return 'Operation failed. Check your '
+        'Google Drive connection and try again.';
   }
 
   // ========================================
-  // CONNECT TO GOOGLE DRIVE
+  // GET GOOGLE ACCOUNT
   // ========================================
 
-  Future<void> _connect() async {
-    if (_busy || !_sessionValid) return;
+  Future<GoogleSignInAccount>
+  _getGoogleAccount() async {
+    if (_connected) {
+      return _account!;
+    }
+
+    final attempt = GoogleSignIn.instance
+        .attemptLightweightAuthentication();
+
+    if (attempt == null) {
+      throw StateError(
+        'Google account is not available. '
+            'Please sign in again.',
+      );
+    }
+
+    final account = await attempt;
+
+    if (account == null || !_sessionValid) {
+      throw StateError(
+        'Google account is unavailable '
+            'or the session has changed.',
+      );
+    }
+
+    return account;
+  }
+
+  // ========================================
+  // CONNECT GOOGLE DRIVE
+  // ========================================
+
+  Future<void> _connect({
+    bool requestPermission = true,
+  }) async {
+    if (!mounted ||
+        !_sessionValid ||
+        _busy) {
+      return;
+    }
 
     final request = ++_request;
 
     setState(() {
       _busy = true;
-      _status = 'Connecting to Google Drive...';
+      _status = requestPermission
+          ? 'Connecting to Google Drive...'
+          : 'Checking Google Drive access...';
     });
 
     try {
       final account = await _getGoogleAccount();
 
-      if (!mounted || !_sessionValid || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
-      final backups = await _service.connectAndListBackups(account);
+      final authorization =
+      await account.authorizationClient
+          .authorizationForScopes([
+        GoogleDriveBackupService.driveScope,
+      ]);
 
-      if (!mounted || !_sessionValid || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
+        return;
+      }
+
+      if (authorization == null &&
+          !requestPermission) {
+        setState(() {
+          _account = null;
+          _backups = [];
+          _status =
+          'Tap Connect Google Drive '
+              'to grant backup permission.';
+        });
+
+        return;
+      }
+
+      final files =
+      await _service.connectAndListBackups(
+        account,
+      );
+
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
       setState(() {
         _account = account;
-        _backups = backups;
-
+        _backups = files;
         _status =
-            'Google Drive connected. '
-            '${backups.length} backup(s) found.';
+        'Google Drive connected. '
+            '${files.length} backup(s) found.';
       });
     } catch (error) {
-      if (!mounted || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
       setState(() {
         _account = null;
         _backups = [];
-
         _status = _errorText(error);
       });
     } finally {
-      if (mounted && request == _request) {
-        setState(() => _busy = false);
+      if (mounted &&
+          _sessionValid &&
+          request == _request) {
+        setState(() {
+          _busy = false;
+        });
       }
     }
   }
 
   // ========================================
-  // RECOVERY PASSWORD DIALOG
+  // SHOW RECOVERY PASSWORD DIALOG
   // ========================================
 
-  Future<String?> _requestPassword({required bool create}) async {
-    final first = TextEditingController();
-    final confirmation = TextEditingController();
-
-    bool hidden = true;
-    String? error;
-
-    try {
-      return await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-
-        builder: (dialogContext) {
-          return StatefulBuilder(
-            builder: (dialogContext, update) {
-              return AlertDialog(
-                title: Text(
-                  create
-                      ? 'Create Encrypted Backup'
-                      : 'Restore Medical History',
-                ),
-
-                content: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        create
-                            ? 'Create a strong recovery '
-                                  'password with at least '
-                                  '14 characters. You will '
-                                  'need this password '
-                                  'after reinstalling.'
-                            : 'Enter the same recovery '
-                                  'password used when '
-                                  'the backup was created.',
-                      ),
-
-                      const SizedBox(height: 15),
-
-                      TextField(
-                        controller: first,
-                        obscureText: hidden,
-                        autocorrect: false,
-                        enableSuggestions: false,
-
-                        decoration: InputDecoration(
-                          labelText: 'Recovery Password',
-
-                          suffixIcon: IconButton(
-                            onPressed: () {
-                              update(() {
-                                hidden = !hidden;
-                              });
-                            },
-
-                            icon: Icon(
-                              hidden ? Icons.visibility : Icons.visibility_off,
-                            ),
-                          ),
-                        ),
-                      ),
-
-                      if (create) ...[
-                        const SizedBox(height: 12),
-
-                        TextField(
-                          controller: confirmation,
-                          obscureText: hidden,
-                          autocorrect: false,
-                          enableSuggestions: false,
-
-                          decoration: const InputDecoration(
-                            labelText: 'Confirm Password',
-                          ),
-                        ),
-                      ],
-
-                      if (error != null) ...[
-                        const SizedBox(height: 12),
-
-                        Text(
-                          error!,
-                          style: const TextStyle(color: AppColors.error),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-
-                actions: [
-                  TextButton(
-                    onPressed: () {
-                      Navigator.pop(dialogContext);
-                    },
-                    child: const Text('Cancel'),
-                  ),
-
-                  FilledButton(
-                    onPressed: () {
-                      if (first.text.runes.length < 14) {
-                        update(() {
-                          error =
-                              'Enter at least '
-                              '14 characters.';
-                        });
-                        return;
-                      }
-
-                      if (create && first.text != confirmation.text) {
-                        update(() {
-                          error = 'Passwords do not match.';
-                        });
-                        return;
-                      }
-
-                      Navigator.pop(dialogContext, first.text);
-                    },
-
-                    child: Text(create ? 'Back Up' : 'Restore'),
-                  ),
-                ],
-              );
-            },
-          );
-        },
-      );
-    } finally {
-      first.dispose();
-      confirmation.dispose();
+  Future<String?> _requestPassword({
+    required bool create,
+  }) async {
+    if (!mounted || !_sessionValid) {
+      return null;
     }
+
+    // FIX:
+    // The dialog owns its TextEditingController.
+    //
+    // We do not create and immediately dispose
+    // controllers around showDialog().
+    //
+    // The dialog disposes its controllers
+    // when Flutter removes the dialog widget.
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _RecoveryPasswordDialog(
+        create: create,
+      ),
+    );
   }
 
   // ========================================
-  // CREATE GOOGLE DRIVE BACKUP
+  // CREATE ENCRYPTED BACKUP
   // ========================================
 
   Future<void> _createBackup() async {
-    if (_busy || !_connected) return;
+    if (_busy || !_connected) {
+      return;
+    }
 
-    final password = await _requestPassword(create: true);
+    final account = _account;
 
-    if (!mounted || password == null || !_connected) {
+    if (account == null) {
+      return;
+    }
+
+    final password = await _requestPassword(
+      create: true,
+    );
+
+    if (!mounted ||
+        !_sessionValid ||
+        password == null ||
+        _busy) {
+      return;
+    }
+
+    // Allow Flutter to finish the current
+    // frame after dismissing the dialog.
+    await WidgetsBinding.instance.endOfFrame;
+
+    if (!mounted || !_sessionValid || _busy) {
       return;
     }
 
     final request = ++_request;
-    final account = _account!;
 
     setState(() {
       _busy = true;
       _status =
-          'Encrypting and uploading '
-          'medical history...';
+      'Encrypting your medical history '
+          'and uploading to Google Drive...';
     });
 
     try {
-      final result = await _service.createEncryptedBackup(account, password);
+      final backup =
+      await _service.createEncryptedBackup(
+        account,
+        password,
+      );
 
-      if (!mounted || !_sessionValid || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
       setState(() {
         _status =
-            'Encrypted backup verified: '
-            '${result.name}';
+        'Encrypted backup uploaded and '
+            'verified successfully.\n\n'
+            '${backup.name}';
       });
 
-      // Refresh the file list after
-      // a successful upload.
+      // Refresh backup list.
 
       try {
-        final backups = await _service.connectAndListBackups(account);
+        final updated =
+        await _service.connectAndListBackups(
+          account,
+        );
 
-        if (mounted && _sessionValid && request == _request) {
+        if (mounted &&
+            _sessionValid &&
+            request == _request) {
           setState(() {
-            _backups = backups;
+            _backups = updated;
           });
         }
       } catch (_) {
-        // Keep the verified upload result.
-        // A listing error does not mean
-        // the upload failed.
+        // Do not hide successful upload
+        // confirmation if refresh fails.
       }
     } catch (error) {
-      if (!mounted || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
@@ -356,120 +375,144 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
       });
     } finally {
       if (mounted && request == _request) {
-        setState(() => _busy = false);
+        setState(() {
+          _busy = false;
+        });
       }
     }
   }
 
   // ========================================
-  // RESTORE SELECTED BACKUP
+  // RESTORE MEDICAL HISTORY
   // ========================================
 
-  Future<void> _restore(MedicalDriveBackupFile backup) async {
-    if (_busy || !_connected) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Restore Medical History?'),
-
-          content: const Text(
-            'Missing records will be added '
-            'to the current Google account. '
-            'Existing visits will not be '
-            'overwritten or deleted.',
-          ),
-
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, false);
-              },
-              child: const Text('Cancel'),
-            ),
-
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, true);
-              },
-              child: const Text('Continue'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (!mounted || confirmed != true || !_connected) {
+  Future<void> _restore(
+      MedicalDriveBackupFile backup,
+      ) async {
+    if (_busy || !_connected) {
       return;
     }
 
-    final password = await _requestPassword(create: false);
+    final account = _account;
 
-    if (!mounted || password == null || !_connected) {
+    if (account == null) {
+      return;
+    }
+
+    // FIX:
+    // Use one password/confirmation dialog.
+    // Avoid opening a second dialog while
+    // the first dialog is still closing.
+
+    final password = await _requestPassword(
+      create: false,
+    );
+
+    if (!mounted ||
+        !_sessionValid ||
+        password == null ||
+        _busy) {
+      return;
+    }
+
+    await WidgetsBinding.instance.endOfFrame;
+
+    if (!mounted || !_sessionValid || _busy) {
       return;
     }
 
     final request = ++_request;
-    final account = _account!;
 
     setState(() {
       _busy = true;
       _status =
-          'Downloading and restoring '
-          'encrypted medical history...';
+      'Downloading and restoring '
+          'medical records...';
     });
 
     try {
-      final result = await _service.restoreEncryptedBackup(
+      final result =
+      await _service.restoreEncryptedBackup(
         account,
         backup.id,
         password,
       );
 
-      if (!mounted || !_sessionValid || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
       setState(() {
         _status =
-            'Restore completed. '
-            '${result.doctorsAdded} doctors, '
-            '${result.visitsAdded} visits, '
-            '${result.medicinesAdded} medicines '
-            'and ${result.testsAdded} tests added. '
-            '${result.existingVisitsSkipped} '
-            'existing visits kept.';
+        'Restore completed successfully.\n\n'
+            'Doctors added: ${result.doctorsAdded}\n'
+            'Visits added: ${result.visitsAdded}\n'
+            'Medicines added: ${result.medicinesAdded}\n'
+            'Tests added: ${result.testsAdded}\n'
+            'Existing visits kept: '
+            '${result.existingVisitsSkipped}';
       });
     } catch (error) {
-      if (!mounted || request != _request) {
+      if (!mounted ||
+          !_sessionValid ||
+          request != _request) {
         return;
       }
 
       setState(() {
         _status =
-            'Restore not confirmed. '
+        'Restore could not be confirmed.\n'
             '${_errorText(error)}';
       });
     } finally {
       if (mounted && request == _request) {
-        setState(() => _busy = false);
+        setState(() {
+          _busy = false;
+        });
       }
     }
   }
 
   // ========================================
-  // BACKUP DATE
+  // FORMAT DATE
   // ========================================
 
   String _dateText(DateTime? date) {
-    if (date == null) return 'Unknown date';
+    if (date == null) {
+      return 'Unknown date';
+    }
 
     final local = date.toLocal();
 
     return '${local.day}/${local.month}/'
         '${local.year}';
+  }
+
+  // ========================================
+  // INVALID SESSION SCREEN
+  // ========================================
+
+  Widget _invalidSessionScreen() {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Google Drive Backup',
+        ),
+      ),
+      body: const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Your Google account session '
+                'has changed. Sign in again '
+                'to access medical backups.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    );
   }
 
   // ========================================
@@ -479,22 +522,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
   @override
   Widget build(BuildContext context) {
     if (!_sessionValid) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Google Drive Backup')),
-
-        body: const Center(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-
-            child: Text(
-              'Your Google account session '
-              'has changed. Sign in again '
-              'before using backups.',
-              textAlign: TextAlign.center,
-            ),
-          ),
-        ),
-      );
+      return _invalidSessionScreen();
     }
 
     return PopScope(
@@ -503,7 +531,22 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
       child: Scaffold(
         backgroundColor: AppColors.background,
 
-        appBar: AppBar(title: const Text('Google Drive Backup')),
+        appBar: AppBar(
+          title: const Text(
+            'Google Drive Backup',
+          ),
+          actions: [
+            IconButton(
+              tooltip: 'Refresh backups',
+              onPressed: _busy
+                  ? null
+                  : () => _connect(
+                requestPermission: false,
+              ),
+              icon: const Icon(Icons.refresh),
+            ),
+          ],
+        ),
 
         body: SafeArea(
           child: ListView(
@@ -522,42 +565,58 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
               const SizedBox(height: 8),
 
               const Text(
-                'Protect your medical records '
-                'with encrypted Google Drive '
-                'backups and a recovery password.',
-                style: TextStyle(color: AppColors.textSecondary),
+                'Keep your medical records '
+                    'safe with encrypted '
+                    'Google Drive backups.',
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.5,
+                  color: AppColors.textSecondary,
+                ),
               ),
 
               const SizedBox(height: 22),
 
               // ============================
-              // CONNECT GOOGLE DRIVE
+              // CONNECTION CARD
               // ============================
+
               Card(
                 child: ListTile(
-                  leading: const Icon(
-                    Icons.add_to_drive,
+                  leading: Icon(
+                    _connected
+                        ? Icons.cloud_done_outlined
+                        : Icons.add_to_drive,
                     color: AppColors.primary,
                   ),
 
-                  title: const Text('Connect Google Drive'),
+                  title: Text(
+                    _connected
+                        ? 'Google Drive Connected'
+                        : 'Connect Google Drive',
+                  ),
 
                   subtitle: Text(
                     _connected
-                        ? 'Connected to your '
-                              'medical Google account'
+                        ? 'Using your signed-in '
+                        'Google account'
                         : 'Authorize private '
-                              'backup storage',
+                        'backup storage',
                   ),
 
-                  onTap: _busy ? null : _connect,
+                  trailing: const Icon(
+                    Icons.chevron_right,
+                  ),
 
-                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _busy
+                      ? null
+                      : () => _connect(),
                 ),
               ),
 
               if (_busy) ...[
                 const SizedBox(height: 12),
+
                 const LinearProgressIndicator(),
               ],
 
@@ -566,9 +625,15 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
 
                 Card(
                   child: Padding(
-                    padding: const EdgeInsets.all(15),
+                    padding: const EdgeInsets.all(16),
 
-                    child: Text(_status!),
+                    child: Text(
+                      _status!,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.5,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -578,23 +643,31 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
               // ============================
               // BACKUP BUTTON
               // ============================
+
               SizedBox(
                 width: double.infinity,
 
                 child: FilledButton.icon(
-                  onPressed: _connected && !_busy ? _createBackup : null,
+                  onPressed: _connected && !_busy
+                      ? _createBackup
+                      : null,
 
-                  icon: const Icon(Icons.cloud_upload_outlined),
+                  icon: const Icon(
+                    Icons.cloud_upload_outlined,
+                  ),
 
-                  label: const Text('Back Up Medical History'),
+                  label: const Text(
+                    'Back Up Medical History',
+                  ),
                 ),
               ),
 
-              const SizedBox(height: 25),
+              const SizedBox(height: 28),
 
               // ============================
-              // RESTORE BACKUPS
+              // AVAILABLE BACKUPS
               // ============================
+
               const Text(
                 'Available Backups',
                 style: TextStyle(
@@ -608,19 +681,35 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
 
               if (!_connected)
                 const Text(
-                  'Connect Google Drive to '
-                  'view available backups.',
+                  'Connect Google Drive '
+                      'to view your backups.',
                 )
               else if (_backups.isEmpty)
-                const Text('No encrypted backups found.')
+                const Card(
+                  child: Padding(
+                    padding: EdgeInsets.all(20),
+
+                    child: Text(
+                      'No encrypted backups '
+                          'found yet.',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                )
               else
                 for (final backup in _backups)
                   Card(
                     child: ListTile(
-                      leading: const Icon(Icons.restore_outlined),
+                      leading: const Icon(
+                        Icons.restore_outlined,
+                        color: AppColors.primary,
+                      ),
 
                       title: Text(
-                        _dateText(backup.createdAt ?? backup.modifiedAt),
+                        _dateText(
+                          backup.createdAt ??
+                              backup.modifiedAt,
+                        ),
                       ),
 
                       subtitle: Text(
@@ -629,42 +718,54 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
                         overflow: TextOverflow.ellipsis,
                       ),
 
-                      trailing: const Icon(Icons.chevron_right),
+                      trailing: const Icon(
+                        Icons.chevron_right,
+                      ),
 
-                      onTap: _busy ? null : () => _restore(backup),
+                      onTap: _busy
+                          ? null
+                          : () => _restore(backup),
                     ),
                   ),
 
-              const SizedBox(height: 22),
+              const SizedBox(height: 24),
 
               // ============================
-              // PRIVACY NOTICE
+              // BACKUP INFORMATION
               // ============================
+
               const Card(
                 child: Padding(
-                  padding: EdgeInsets.all(15),
+                  padding: EdgeInsets.all(16),
 
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment:
+                    CrossAxisAlignment.start,
 
                     children: [
-                      Icon(Icons.info_outline, color: AppColors.primary),
+                      Icon(
+                        Icons.info_outline,
+                        color: AppColors.primary,
+                      ),
 
                       SizedBox(width: 12),
 
                       Expanded(
                         child: Text(
                           'Keep your recovery password '
-                          'safe. Without it, an encrypted '
-                          'backup cannot be restored.\n\n'
-                          'Photos, prescription PDFs '
-                          'and external test reports '
-                          'are not supported by this '
-                          'backup version.',
+                              'safe. Without it, an '
+                              'encrypted backup cannot '
+                              'be restored.\n\n'
+                              'This backup version does '
+                              'not include external images, '
+                              'prescription PDFs or '
+                              'medical test reports.',
+
                           style: TextStyle(
                             fontSize: 12,
                             height: 1.5,
-                            color: AppColors.textSecondary,
+                            color:
+                            AppColors.textSecondary,
                           ),
                         ),
                       ),
@@ -676,6 +777,233 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen>
           ),
         ),
       ),
+    );
+  }
+}
+
+// ==========================================
+// RECOVERY PASSWORD DIALOG
+// ==========================================
+//
+// FIX:
+// The dialog owns and disposes its own
+// TextEditingControllers.
+//
+// Previously the calling method disposed
+// the controllers immediately after
+// showDialog completed.
+//
+// ==========================================
+
+class _RecoveryPasswordDialog
+    extends StatefulWidget {
+  final bool create;
+
+  const _RecoveryPasswordDialog({
+    required this.create,
+  });
+
+  @override
+  State<_RecoveryPasswordDialog> createState() =>
+      _RecoveryPasswordDialogState();
+}
+
+class _RecoveryPasswordDialogState
+    extends State<_RecoveryPasswordDialog> {
+  final TextEditingController _passwordController =
+  TextEditingController();
+
+  final TextEditingController _confirmController =
+  TextEditingController();
+
+  bool _obscure = true;
+
+  String? _error;
+
+  // ========================================
+  // DISPOSE ONLY WHEN DIALOG IS REMOVED
+  // ========================================
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    _confirmController.dispose();
+
+    super.dispose();
+  }
+
+  // ========================================
+  // SUBMIT PASSWORD
+  // ========================================
+
+  void _submit() {
+    final password =
+        _passwordController.text;
+
+    if (widget.create &&
+        password.runes.length < 14) {
+      setState(() {
+        _error =
+        'Use a password with '
+            'at least 14 characters.';
+      });
+      return;
+    }
+
+    if (!widget.create && password.isEmpty) {
+      setState(() {
+        _error =
+        'Enter your recovery password.';
+      });
+      return;
+    }
+
+    if (widget.create &&
+        password != _confirmController.text) {
+      setState(() {
+        _error = 'Passwords do not match.';
+      });
+      return;
+    }
+
+    // Remove keyboard focus before
+    // dismissing the dialog.
+
+    FocusManager.instance.primaryFocus?.unfocus();
+
+    Navigator.of(context).pop(password);
+  }
+
+  // ========================================
+  // BUILD DIALOG
+  // ========================================
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        widget.create
+            ? 'Create Encrypted Backup'
+            : 'Restore Medical History',
+      ),
+
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+
+          children: [
+            Text(
+              widget.create
+                  ? 'Create a recovery password '
+                  'with at least 14 characters. '
+                  'You will need this password '
+                  'if you reinstall the app '
+                  'or change phones.'
+                  : 'Enter the recovery password '
+                  'used when creating this backup.\n\n'
+                  'Missing records will be added. '
+                  'Existing visits will not be '
+                  'overwritten or deleted.',
+            ),
+
+            const SizedBox(height: 16),
+
+            TextField(
+              controller: _passwordController,
+
+              obscureText: _obscure,
+
+              autocorrect: false,
+
+              enableSuggestions: false,
+
+              textInputAction: widget.create
+                  ? TextInputAction.next
+                  : TextInputAction.done,
+
+              onSubmitted: widget.create
+                  ? null
+                  : (_) => _submit(),
+
+              decoration: InputDecoration(
+                labelText: 'Recovery Password',
+
+                suffixIcon: IconButton(
+                  onPressed: () {
+                    setState(() {
+                      _obscure = !_obscure;
+                    });
+                  },
+
+                  icon: Icon(
+                    _obscure
+                        ? Icons.visibility
+                        : Icons.visibility_off,
+                  ),
+                ),
+              ),
+            ),
+
+            if (widget.create) ...[
+              const SizedBox(height: 12),
+
+              TextField(
+                controller: _confirmController,
+
+                obscureText: _obscure,
+
+                autocorrect: false,
+
+                enableSuggestions: false,
+
+                textInputAction:
+                TextInputAction.done,
+
+                onSubmitted: (_) => _submit(),
+
+                decoration: const InputDecoration(
+                  labelText: 'Confirm Password',
+                ),
+              ),
+            ],
+
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+
+              Text(
+                _error!,
+
+                style: const TextStyle(
+                  color: AppColors.error,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+
+      actions: [
+        TextButton(
+          onPressed: () {
+            FocusManager.instance.primaryFocus
+                ?.unfocus();
+
+            Navigator.of(context).pop();
+          },
+
+          child: const Text('Cancel'),
+        ),
+
+        FilledButton(
+          onPressed: _submit,
+
+          child: Text(
+            widget.create
+                ? 'Create Backup'
+                : 'Restore',
+          ),
+        ),
+      ],
     );
   }
 }

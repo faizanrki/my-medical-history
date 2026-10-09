@@ -1,74 +1,109 @@
 
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 import 'app.dart';
 import 'data/app_database.dart';
 
-// =====================================
-// MY MEDICAL HISTORY - SECURE STARTUP
-// STEP 44.3
-// =====================================
+// ==========================================
+// MY MEDICAL HISTORY
+// SECURE STARTUP + GOOGLE DRIVE FIX
+// STEP 45 - UPDATED MAIN.DART
+// ==========================================
+
+// This must be the WEB APPLICATION
+// OAuth Client ID from Google Cloud.
+//
+// This ID is not a client secret.
+
+const String _googleWebClientId =
+    '1034931391245-7meob6r56ovvlgv13nhv1s4qbu4qbk9j.apps.googleusercontent.com';
+
+// ==========================================
+// MAIN APPLICATION ENTRY POINT
+// ==========================================
 
 Future<void> main() async {
-  // =====================================
+  // ========================================
   // INITIALIZE FLUTTER
-  // =====================================
+  // ========================================
 
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    // =====================================
-    // LOCK MEDICAL STORAGE BEFORE LOGIN
-    // =====================================
+    // ======================================
+    // STEP 1 - LOCK MEDICAL STORAGE
+    // ======================================
 
-    // Do not open the legacy database here.
+    // Never open an account-specific
+    // database before Google Sign-In.
     //
-    // Google authentication must happen
-    // before selecting a medical database.
-    //
-    // This protects the startup flow from
-    // accessing records before login.
+    // This does not delete databases,
+    // medical records, or encryption keys.
 
     await AppDatabase.instance.lockAccount();
 
-    // =====================================
-    // START APPLICATION
-    // =====================================
+    // ======================================
+    // STEP 2 - INITIALIZE GOOGLE SIGN-IN
+    // ======================================
 
-    // app.dart starts SplashScreen and then
-    // GoogleSignInScreen.
+    // IMPORTANT:
     //
-    // GoogleSignInScreen will select the
-    // authenticated account's database
-    // before entering Dashboard.
+    // Supply the WEB OAuth Client ID
+    // through serverClientId.
+    //
+    // Wait until initialization completes
+    // before starting the application.
+    //
+    // Do not ignore initialization errors.
+
+    await GoogleSignIn.instance.initialize(
+      serverClientId: _googleWebClientId,
+    );
+
+    // ======================================
+    // STEP 3 - START MY MEDICAL HISTORY
+    // ======================================
+
+    // app.dart opens the Splash Screen.
+    //
+    // The Google Sign-In screen then
+    // authenticates the user.
+    //
+    // The user's account-specific encrypted
+    // database must be opened only after
+    // successful Google authentication.
 
     runApp(const MyMedicalHistoryApp());
-  } catch (_) {
-    // =====================================
+  } catch (error) {
+    // ======================================
     // SECURE STARTUP FAILURE
-    // =====================================
+    // ======================================
 
-    // Do not open another database.
+    // If initialization fails:
     //
-    // Do not delete records or encryption keys.
+    // - Do not open the medical database.
+    // - Do not bypass authentication.
+    // - Do not delete medical records.
+    // - Do not create replacement keys.
     //
-    // Do not print sensitive information.
+    // Print only the exception type.
+    // Do not print tokens or private data.
 
-    assert(() {
-      debugPrint(
-        'Secure application startup failed.',
-      );
+    debugPrint(
+      'Secure startup failed: '
+          '${error.runtimeType}',
+    );
 
-      return true;
-    }());
-
-    runApp(const _SecureStartupUnavailableApp());
+    runApp(
+      const _SecureStartupUnavailableApp(),
+    );
   }
 }
 
-// =====================================
-// SECURE STARTUP UNAVAILABLE SCREEN
-// =====================================
+// ==========================================
+// SECURE STARTUP ERROR APPLICATION
+// ==========================================
 
 class _SecureStartupUnavailableApp
     extends StatelessWidget {
@@ -108,23 +143,21 @@ class _SecureStartupUnavailableApp
                 mainAxisSize: MainAxisSize.min,
 
                 children: [
-                  // =================================
-                  // SECURITY ICON
-                  // =================================
+                  // ========================
+                  // ERROR ICON
+                  // ========================
 
                   const Icon(
                     Icons.lock_outline,
-
                     size: 72,
-
                     color: Color(0xFFE74C3C),
                   ),
 
                   const SizedBox(height: 22),
 
-                  // =================================
-                  // SCREEN TITLE
-                  // =================================
+                  // ========================
+                  // TITLE
+                  // ========================
 
                   const Text(
                     'Secure Startup Unavailable',
@@ -140,37 +173,39 @@ class _SecureStartupUnavailableApp
 
                   const SizedBox(height: 14),
 
-                  // =================================
+                  // ========================
                   // EXPLANATION
-                  // =================================
+                  // ========================
 
                   const Text(
                     'The application could not '
-                        'initialize secure medical '
-                        'storage access.',
+                        'initialize Google Sign-In '
+                        'or secure medical storage.',
 
                     textAlign: TextAlign.center,
 
                     style: TextStyle(
                       fontSize: 15,
+                      height: 1.5,
                       color: Color(0xFF718096),
                     ),
                   ),
 
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 22),
 
-                  // =================================
-                  // DATA SAFETY INFORMATION
-                  // =================================
+                  // ========================
+                  // DATA SAFETY CARD
+                  // ========================
 
                   Container(
                     width: double.infinity,
 
-                    padding:
-                    const EdgeInsets.all(18),
+                    padding: const EdgeInsets.all(18),
 
                     decoration: BoxDecoration(
-                      color: const Color(0xFFFFF4E5),
+                      color: const Color(
+                        0xFFFFF4E5,
+                      ),
 
                       borderRadius:
                       BorderRadius.circular(14),
@@ -180,18 +215,19 @@ class _SecureStartupUnavailableApp
                       children: [
                         Icon(
                           Icons.info_outline,
-
                           color: Color(0xFFE67E22),
                         ),
 
                         SizedBox(height: 12),
 
                         Text(
-                          'No database reset or deletion '
-                              'was requested.\n\n'
-                              'Do not uninstall the app or '
-                              'clear its storage while '
-                              'recovering medical data.',
+                          'Your medical records '
+                              'have not been '
+                              'intentionally deleted.\n\n'
+                              'Do not uninstall this '
+                              'app or clear its data '
+                              'while fixing the '
+                              'Google configuration.',
 
                           textAlign: TextAlign.center,
 
@@ -204,22 +240,23 @@ class _SecureStartupUnavailableApp
                     ),
                   ),
 
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 22),
 
-                  // =================================
-                  // RECOVERY MESSAGE
-                  // =================================
+                  // ========================
+                  // RECOVERY INSTRUCTIONS
+                  // ========================
 
                   const Text(
-                    'Close and reopen the app once. '
-                        'If the problem continues, '
-                        'review the storage configuration '
-                        'before trying again.',
+                    'Check the Web OAuth Client ID, '
+                        'Android app configuration, '
+                        'and Google Sign-In setup. '
+                        'Then close and reopen the app.',
 
                     textAlign: TextAlign.center,
 
                     style: TextStyle(
                       fontSize: 13,
+                      height: 1.5,
                       color: Colors.black54,
                     ),
                   ),

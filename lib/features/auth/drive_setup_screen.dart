@@ -21,6 +21,11 @@ class _DriveSetupScreenState extends State<DriveSetupScreen> {
 
   final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
 
+  static const String _serverClientId = String.fromEnvironment(
+    'GOOGLE_WEB_CLIENT_ID',
+    defaultValue: '',
+  );
+
   @override
   void initState() {
     super.initState();
@@ -29,7 +34,9 @@ class _DriveSetupScreenState extends State<DriveSetupScreen> {
 
   Future<void> _checkSignIn() async {
     try {
-      await _googleSignIn.initialize();
+      await _googleSignIn.initialize(
+        serverClientId: _serverClientId.isEmpty ? null : _serverClientId,
+      );
       final account = await _googleSignIn.attemptLightweightAuthentication();
       if (account != null && mounted) {
         setState(() {
@@ -46,7 +53,9 @@ class _DriveSetupScreenState extends State<DriveSetupScreen> {
     });
 
     try {
-      await _googleSignIn.initialize();
+      await _googleSignIn.initialize(
+        serverClientId: _serverClientId.isEmpty ? null : _serverClientId,
+      );
       final account = await _googleSignIn.authenticate();
       if (account != null) {
         setState(() {
@@ -56,7 +65,15 @@ class _DriveSetupScreenState extends State<DriveSetupScreen> {
         _showMessage('Google Drive connected successfully!');
       }
     } catch (e) {
-      _showMessage('Failed to connect Google Drive: $e');
+      if (e.toString().contains('clientConfigurationError') ||
+          e.toString().contains('serverClientId')) {
+        _showMessage(
+          'Google Drive requires a Web Client ID.\n'
+          'Run app with: flutter run --dart-define=GOOGLE_WEB_CLIENT_ID=your_id',
+        );
+      } else {
+        _showMessage('Failed to connect Google Drive: $e');
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -85,7 +102,7 @@ class _DriveSetupScreenState extends State<DriveSetupScreen> {
   void _showMessage(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating, duration: const Duration(seconds: 5)),
     );
   }
 

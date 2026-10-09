@@ -1,40 +1,20 @@
 
-import 'backup_restore_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../data/app_database.dart';
-import '../../services/medical_history_read_service.dart';
 import '../../services/google_drive_backup_service.dart';
-
+import '../../services/medical_history_read_service.dart';
 import '../auth/google_signin_screen.dart';
+import 'backup_restore_screen.dart';
 
-// ============================================
 // MY MEDICAL HISTORY
-// STEP 45.2 - SETTINGS + GOOGLE DRIVE
-// ============================================
-//
-// FEATURES:
-//
-// 1. Account-specific medical record counts.
-// 2. Encrypted SQLite database verification.
-// 3. Google Drive authorization.
-// 4. Private Drive backup-file listing.
-// 5. Account session checks.
-// 6. Google sign-out with database locking.
-// 7. Doctors and History navigation.
-// 8. Safe handling of asynchronous requests.
-//
-// NOTE:
-// Google Drive backup and restore are not
-// implemented in this screen yet.
-//
-// ============================================
+// STEP 45 - SETTINGS WITH GOOGLE DRIVE
 
-enum _SettingsMenuAction {
+enum _SettingsAction {
   refresh,
-  verifyDatabase,
+  verify,
   about,
   signOut,
 }
@@ -54,78 +34,37 @@ class SettingsScreen extends StatefulWidget {
       _SettingsScreenState();
 }
 
-class _SettingsScreenState
-    extends State<SettingsScreen>
+class _SettingsScreenState extends State<SettingsScreen>
     with WidgetsBindingObserver {
+  final _readService = MedicalHistoryReadService.instance;
+  final _driveService = GoogleDriveBackupService.instance;
 
-  // ========================================
-  // SERVICES
-  // ========================================
-
-  final MedicalHistoryReadService _readService =
-      MedicalHistoryReadService.instance;
-
-  final GoogleDriveBackupService _driveService =
-      GoogleDriveBackupService.instance;
-
-  // ========================================
-  // ACCOUNT SESSION
-  // ========================================
-
-  late final int _screenSessionGeneration;
-
-  bool get _isCurrentSession =>
-      AppDatabase.instance.isSessionCurrent(
-        _screenSessionGeneration,
-      );
-
-  // ========================================
-  // MEDICAL RECORD COUNTS
-  // ========================================
+  late final int _generation;
 
   MedicalHistoryCounts? _counts;
-
-  bool _isLoadingCounts = true;
-
+  bool _loadingCounts = true;
   String? _countsError;
 
-  int _countsRequest = 0;
-
-  // ========================================
-  // DATABASE HEALTH
-  // ========================================
-
-  bool _isCheckingStorage = false;
-
-  String? _storageResult;
-
+  bool _checkingStorage = false;
+  String? _storageMessage;
   bool? _storagePassed;
 
-  int _storageRequest = 0;
-
-  // ========================================
-  // GOOGLE DRIVE STATE
-  // ========================================
-
-  bool _isConnectingDrive = false;
-
-  bool _isDriveConnected = false;
-
+  bool _connectingDrive = false;
+  bool _driveConnected = false;
+  GoogleSignInAccount? _driveAccount;
+  List<MedicalDriveBackupFile> _driveFiles = [];
   String? _driveMessage;
 
-  List<MedicalDriveBackupFile> _driveFiles = [];
+  bool _signingOut = false;
 
+  int _countsRequest = 0;
+  int _storageRequest = 0;
   int _driveRequest = 0;
 
-  // ========================================
-  // SIGN-OUT STATE
-  // ========================================
+  bool get _valid =>
+      AppDatabase.instance.isSessionCurrent(_generation);
 
-  bool _isSigningOut = false;
-
-  // ========================================
-  // INITIALIZE
-  // ========================================
+  bool get _driveBusy => _connectingDrive || _signingOut;
 
   @override
   void initState() {
@@ -133,31 +72,23 @@ class _SettingsScreenState
 
     WidgetsBinding.instance.addObserver(this);
 
-    _screenSessionGeneration =
-        AppDatabase.instance.sessionGeneration;
+    _generation = AppDatabase.instance.sessionGeneration;
 
     _loadCounts();
-  }
 
-  // ========================================
-  // APP LIFECYCLE
-  // ========================================
+    // Automatically look for existing Drive access.
+    // Do not show a new consent screen.
+    _connectDrive(requestPermission: false);
+  }
 
   @override
   void didChangeAppLifecycleState(
       AppLifecycleState state,
       ) {
-    if (state == AppLifecycleState.resumed &&
-        mounted) {
-      // Recheck session before showing
-      // sensitive medical record counts.
+    if (state == AppLifecycleState.resumed && mounted) {
       setState(() {});
     }
   }
-
-  // ========================================
-  // DISPOSE
-  // ========================================
 
   @override
   void dispose() {
@@ -175,38 +106,32 @@ class _SettingsScreenState
   // ========================================
 
   Future<void> _loadCounts() async {
-    if (!mounted ||
-        _isSigningOut ||
-        !_isCurrentSession) {
-      return;
-    }
+    if (!mounted || !_valid || _signingOut) return;
 
     final request = ++_countsRequest;
 
     setState(() {
-      _isLoadingCounts = true;
+      _loadingCounts = true;
       _countsError = null;
     });
 
     try {
-      final counts =
-      await _readService.getHistoryCounts();
+      final counts = await _readService.getHistoryCounts();
 
       if (!mounted ||
-          _isSigningOut ||
-          !_isCurrentSession ||
+          !_valid ||
+          _signingOut ||
           request != _countsRequest) {
         return;
       }
 
       setState(() {
         _counts = counts;
-        _countsError = null;
       });
     } catch (_) {
       if (!mounted ||
-          _isSigningOut ||
-          !_isCurrentSession ||
+          !_valid ||
+          _signingOut ||
           request != _countsRequest) {
         return;
       }
@@ -214,16 +139,14 @@ class _SettingsScreenState
       setState(() {
         _counts = null;
         _countsError =
-        'Unable to load medical record counts.';
+        'Unable to load your medical record counts.';
       });
     } finally {
       if (mounted &&
-          !_isSigningOut &&
-          _isCurrentSession &&
+          _valid &&
+          !_signingOut &&
           request == _countsRequest) {
-        setState(() {
-          _isLoadingCounts = false;
-        });
+        setState(() => _loadingCounts = false);
       }
     }
   }
@@ -232,335 +155,294 @@ class _SettingsScreenState
   // VERIFY ENCRYPTED DATABASE
   // ========================================
 
-  Future<void> _checkDatabaseHealth() async {
+  Future<void> _verifyDatabase() async {
     if (!mounted ||
-        _isSigningOut ||
-        _isCheckingStorage ||
-        !_isCurrentSession) {
+        !_valid ||
+        _signingOut ||
+        _checkingStorage) {
       return;
     }
 
     final request = ++_storageRequest;
 
     setState(() {
-      _isCheckingStorage = true;
+      _checkingStorage = true;
+      _storageMessage = null;
       _storagePassed = null;
-      _storageResult = null;
     });
 
     try {
       final db = await AppDatabase.instance.database;
 
-      if (!_isCurrentSession) {
-        throw StateError('Account session changed.');
+      if (!_valid) {
+        throw StateError('Account changed.');
       }
 
-      // ====================================
-      // CHECK SQLCIPHER
-      // ====================================
-
-      final cipherResult = await db.rawQuery(
+      final cipher = await db.rawQuery(
         'PRAGMA cipher_version',
       );
 
-      if (!_isCurrentSession) {
-        throw StateError('Account session changed.');
+      if (!_valid) {
+        throw StateError('Account changed.');
       }
 
-      if (cipherResult.isEmpty ||
-          cipherResult.first.isEmpty ||
-          cipherResult.first.values.first
+      if (cipher.isEmpty ||
+          cipher.first.isEmpty ||
+          cipher.first.values.first
               .toString()
               .trim()
               .isEmpty) {
-        throw StateError(
-          'SQLCipher verification failed.',
-        );
+        throw StateError('SQLCipher check failed.');
       }
-
-      // ====================================
-      // CHECK FOREIGN KEYS
-      // ====================================
 
       final foreignKeys = await db.rawQuery(
         'PRAGMA foreign_keys',
       );
 
-      if (!_isCurrentSession) {
-        throw StateError('Account session changed.');
+      if (!_valid) {
+        throw StateError('Account changed.');
       }
 
       if (foreignKeys.isEmpty ||
-          foreignKeys.first.isEmpty ||
-          foreignKeys.first.values.first
-              .toString() !=
-              '1') {
-        throw StateError(
-          'Foreign keys are not enabled.',
-        );
+          foreignKeys.first.values.first.toString() != '1') {
+        throw StateError('Foreign keys are disabled.');
       }
 
-      // ====================================
-      // CHECK RELATIONSHIP INTEGRITY
-      // ====================================
-
-      final relationshipProblems =
-      await db.rawQuery(
+      final problems = await db.rawQuery(
         'PRAGMA foreign_key_check',
       );
 
-      if (!_isCurrentSession) {
-        throw StateError('Account session changed.');
+      if (!_valid) {
+        throw StateError('Account changed.');
       }
 
-      if (relationshipProblems.isNotEmpty) {
-        throw StateError(
-          'Database relationship check failed.',
-        );
+      if (problems.isNotEmpty) {
+        throw StateError('Database relationships are invalid.');
       }
 
-      // ====================================
-      // CHECK DATABASE INTEGRITY
-      // ====================================
-
-      final integrityResult = await db.rawQuery(
+      final integrity = await db.rawQuery(
         'PRAGMA quick_check',
       );
 
-      if (!_isCurrentSession) {
-        throw StateError('Account session changed.');
+      if (!_valid) {
+        throw StateError('Account changed.');
       }
 
-      if (integrityResult.length != 1 ||
-          integrityResult.first.isEmpty ||
-          integrityResult.first.values.first
+      if (integrity.length != 1 ||
+          integrity.first.values.first
               .toString()
-              .trim()
               .toLowerCase() !=
               'ok') {
-        throw StateError(
-          'Database integrity check failed.',
-        );
+        throw StateError('Database integrity check failed.');
       }
 
       if (!mounted ||
-          _isSigningOut ||
-          !_isCurrentSession ||
+          !_valid ||
           request != _storageRequest) {
         return;
       }
 
       setState(() {
         _storagePassed = true;
-
-        _storageResult =
-        'Database checks passed. '
-            'SQLCipher is available, foreign '
-            'keys are enabled, and the '
-            'integrity checks returned OK.';
+        _storageMessage =
+        'Database checks passed. SQLCipher is active. '
+            'Foreign keys and integrity checks returned OK.';
       });
     } catch (_) {
       if (!mounted ||
-          _isSigningOut ||
-          !_isCurrentSession ||
+          !_valid ||
           request != _storageRequest) {
         return;
       }
 
       setState(() {
         _storagePassed = false;
-
-        _storageResult =
-        'Database verification could not '
-            'be completed successfully. '
-            'No medical records or encryption '
-            'keys were intentionally deleted.';
+        _storageMessage =
+        'Database verification could not be completed. '
+            'No records or encryption keys were deleted.';
       });
     } finally {
       if (mounted &&
-          !_isSigningOut &&
-          _isCurrentSession &&
+          _valid &&
           request == _storageRequest) {
-        setState(() {
-          _isCheckingStorage = false;
-        });
+        setState(() => _checkingStorage = false);
       }
     }
   }
 
   // ========================================
-  // CONNECT GOOGLE DRIVE
+  // GOOGLE DRIVE CONNECTION
   // ========================================
 
-  Future<void> _connectGoogleDrive() async {
+  Future<void> _connectDrive({
+    required bool requestPermission,
+  }) async {
     if (!mounted ||
-        _isSigningOut ||
-        _isConnectingDrive ||
-        !_isCurrentSession) {
+        !_valid ||
+        _signingOut ||
+        _connectingDrive) {
       return;
     }
 
     final request = ++_driveRequest;
 
     setState(() {
-      _isConnectingDrive = true;
-      _isDriveConnected = false;
+      _connectingDrive = true;
+      _driveConnected = false;
+      _driveAccount = null;
       _driveFiles = [];
 
-      _driveMessage =
-      'Checking your signed-in Google '
-          'account and requesting Drive access...';
+      _driveMessage = requestPermission
+          ? 'Connecting to Google Drive...'
+          : 'Checking existing Google Drive access...';
     });
 
     try {
-      // ====================================
-      // GET EXISTING GOOGLE ACCOUNT
-      // ====================================
-
-      // Google Sign-In 7.x does not expose
-      // the old currentUser property.
-      //
-      // Attempt to recover the existing
-      // authenticated Google account.
-      //
-      // Do not call authenticate() here.
-      // This screen must not silently start
-      // a new, different account session.
+      // Reuse the Google account signed in earlier.
+      // Never start a different interactive sign-in
+      // from Settings.
 
       final attempt = GoogleSignIn.instance
           .attemptLightweightAuthentication();
 
-      if (attempt == null) {
-        throw StateError(
-          'The current Google account could '
-              'not be retrieved. Please return '
-              'to Google Sign-In.',
-        );
-      }
-
       final GoogleSignInAccount? account =
-      await attempt;
+      attempt == null ? null : await attempt;
 
       if (!mounted ||
-          !_isCurrentSession ||
-          _isSigningOut ||
+          !_valid ||
+          _signingOut ||
           request != _driveRequest) {
         return;
       }
 
       if (account == null) {
         throw StateError(
-          'No authenticated Google account '
-              'is available. Please sign in again.',
+          'No signed-in Google account was found. '
+              'Please sign in again.',
         );
       }
 
-      // ====================================
-      // REQUEST DRIVE PERMISSION
-      // ====================================
+      // This is a silent permission check.
+      // It does not request new consent.
 
-      // The Drive service verifies that
-      // this account ID matches the active
-      // encrypted medical database.
-      //
-      // It then requests drive.appdata scope
-      // and reads only backup-file metadata.
+      final authorization = await account
+          .authorizationClient
+          .authorizationForScopes([
+        GoogleDriveBackupService.driveScope,
+      ]);
+
+      if (!mounted ||
+          !_valid ||
+          _signingOut ||
+          request != _driveRequest) {
+        return;
+      }
+
+      if (authorization == null && !requestPermission) {
+        setState(() {
+          _driveMessage =
+          'Google account is signed in. '
+              'Tap Connect Google Drive to allow backups.';
+        });
+        return;
+      }
+
+      // The service verifies the Google account
+      // matches the active encrypted database.
+      // When necessary, it requests Drive permission.
 
       final files =
       await _driveService.connectAndListBackups(
         account,
       );
 
-      // ====================================
-      // CHECK SESSION AFTER NETWORK REQUEST
-      // ====================================
-
       if (!mounted ||
-          !_isCurrentSession ||
-          _isSigningOut ||
+          !_valid ||
+          _signingOut ||
           request != _driveRequest) {
         return;
       }
 
-      // ====================================
-      // CONNECTED
-      // ====================================
-
       setState(() {
-        _isDriveConnected = true;
+        _driveAccount = account;
+        _driveConnected = true;
         _driveFiles = files;
 
         _driveMessage = files.isEmpty
-            ? 'Google Drive is connected. '
-            'No app backup files were found.'
-            : 'Google Drive is connected. '
-            '${files.length} backup file(s) found.';
+            ? 'Google Drive connected successfully. '
+            'No backups found yet.'
+            : 'Google Drive connected successfully. '
+            '${files.length} backup(s) found.';
       });
     } catch (error) {
       if (!mounted ||
-          !_isCurrentSession ||
-          _isSigningOut ||
+          !_valid ||
+          _signingOut ||
           request != _driveRequest) {
         return;
       }
 
-      // Do not expose access tokens,
-      // database paths, or raw API replies.
+      var message =
+          'Could not verify Google Drive. '
+          'Check your connection and try again.';
 
-      String message =
-          'Could not connect Google Drive. '
-          'Check your internet connection, '
-          'Drive API configuration, and '
-          'Google account permissions.';
-
-      // These messages are produced by our
-      // own service, not a raw HTTP response.
       if (error is StateError) {
+        message = error.message.toString();
+      } else if (error is FormatException) {
         message = error.message;
       }
 
       setState(() {
-        _isDriveConnected = false;
+        _driveConnected = false;
+        _driveAccount = null;
         _driveFiles = [];
         _driveMessage = message;
       });
     } finally {
       if (mounted &&
-          !_isSigningOut &&
-          _isCurrentSession &&
+          _valid &&
+          !_signingOut &&
           request == _driveRequest) {
-        setState(() {
-          _isConnectingDrive = false;
-        });
+        setState(() => _connectingDrive = false);
       }
     }
   }
 
   // ========================================
-  // FORMAT BACKUP DATE
+  // OPEN BACKUP & RESTORE
   // ========================================
 
-  String _formatBackupDate(DateTime? date) {
-    if (date == null) {
-      return 'Date unavailable';
+  Future<void> _openBackupRestore() async {
+    if (!mounted ||
+        !_valid ||
+        _driveBusy ||
+        !_driveConnected ||
+        _driveAccount == null) {
+      return;
     }
 
-    final local = date.toLocal();
+    final account = _driveAccount!;
 
-    final day =
-    local.day.toString().padLeft(2, '0');
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => BackupRestoreScreen(
+          initialAccount: account,
+          initialBackups:
+          List<MedicalDriveBackupFile>.of(_driveFiles),
+        ),
+      ),
+    );
 
-    final month =
-    local.month.toString().padLeft(2, '0');
+    if (!mounted || !_valid || _signingOut) {
+      return;
+    }
 
-    final hour =
-    local.hour.toString().padLeft(2, '0');
+    // Refresh after backing up or restoring.
+    await _connectDrive(requestPermission: false);
 
-    final minute =
-    local.minute.toString().padLeft(2, '0');
-
-    return '$day/$month/${local.year} '
-        '$hour:$minute';
+    if (mounted && _valid) {
+      await _loadCounts();
+    }
   }
 
   // ========================================
@@ -568,110 +450,67 @@ class _SettingsScreenState
   // ========================================
 
   Future<void> _signOut() async {
-    if (!mounted ||
-        _isSigningOut ||
-        _isConnectingDrive) {
-      return;
-    }
+    if (!mounted || _driveBusy) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
-
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text(
-            'Sign out of Google?',
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Sign out of Google?'),
+        content: const Text(
+          'You will leave your medical account on this device.\n\n'
+              'Your local medical records will not be deleted.\n\n'
+              'Signing out does not create a Google Drive backup.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
           ),
-
-          content: const Text(
-            'You will leave your medical '
-                'history account on this device.\n\n'
-                'Your saved local medical records '
-                'will not be deleted.\n\n'
-                'A Google Drive backup is not '
-                'automatically created when '
-                'you sign out.',
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(true),
+            child: const Text('Sign Out'),
           ),
-
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(dialogContext).pop(
-                  false,
-                );
-              },
-
-              child: const Text('Cancel'),
-            ),
-
-            FilledButton(
-              onPressed: () {
-                Navigator.of(dialogContext).pop(
-                  true,
-                );
-              },
-
-              child: const Text('Sign Out'),
-            ),
-          ],
-        );
-      },
+        ],
+      ),
     );
 
-    if (!mounted || confirmed != true) {
-      return;
-    }
-
-    if (_isConnectingDrive || _isSigningOut) {
+    if (!mounted || confirmed != true || _driveBusy) {
       return;
     }
 
     setState(() {
-      _isSigningOut = true;
-      _isDriveConnected = false;
+      _signingOut = true;
+      _driveConnected = false;
+      _driveAccount = null;
       _driveFiles = [];
       _driveMessage = null;
       _counts = null;
     });
 
-    // Ignore older asynchronous responses.
+    _driveRequest++;
     _countsRequest++;
     _storageRequest++;
-    _driveRequest++;
-
-    // ======================================
-    // LOCK ENCRYPTED LOCAL DATABASE FIRST
-    // ======================================
 
     try {
       await AppDatabase.instance.lockAccount();
     } catch (_) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
-      setState(() {
-        _isSigningOut = false;
-      });
+      setState(() => _signingOut = false);
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Medical storage could not be '
-                'locked safely. Sign-out was '
-                'stopped. Close the app before '
-                'trying again.',
+            'Could not safely lock medical storage. '
+                'Sign-out was stopped.',
           ),
         ),
       );
-
       return;
     }
-
-    // ======================================
-    // SIGN OUT OF GOOGLE
-    // ======================================
 
     String notice =
         'You signed out successfully. '
@@ -681,18 +520,11 @@ class _SettingsScreenState
       await GoogleSignIn.instance.signOut();
     } catch (_) {
       notice =
-      'Local medical storage is locked, '
-          'but Google sign-out could not '
-          'be confirmed. Please try again.';
+      'Medical storage is locked, but Google sign-out '
+          'could not be confirmed.';
     }
 
-    if (!mounted) {
-      return;
-    }
-
-    // ======================================
-    // RETURN TO SIGN-IN SCREEN
-    // ======================================
+    if (!mounted) return;
 
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute<void>(
@@ -706,109 +538,76 @@ class _SettingsScreenState
   }
 
   // ========================================
-  // ABOUT APP
+  // ABOUT
   // ========================================
 
-  void _showAboutApp() {
-    if (!_isCurrentSession || !mounted) {
-      return;
-    }
-
+  void _about() {
     showAboutDialog(
       context: context,
       applicationName: 'My Medical History',
-
       applicationIcon: const Icon(
         Icons.health_and_safety_outlined,
         color: AppColors.primary,
         size: 36,
       ),
-
       children: const [
         Text(
-          'Organize your doctor visits, '
-              'medicines, and medical tests.',
+          'Organize doctor visits, medicines '
+              'and medical tests.',
         ),
-
         SizedBox(height: 10),
-
         Text(
-          'Local records use encrypted '
-              'SQLite storage. Google Drive '
-              'connection is being added, '
-              'but backup and restore are '
-              'not available yet.',
+          'Medical records are stored in an encrypted '
+              'account-specific database.',
         ),
-
         SizedBox(height: 10),
-
         Text(
-          'Use dummy medical records until '
-              'backup recovery and account '
-              'security testing are complete.',
+          'Google Drive backups require a recovery password. '
+              'The current backup format does not include '
+              'external images, PDFs or test reports.',
         ),
       ],
     );
   }
 
-  // ========================================
-  // MORE MENU ACTIONS
-  // ========================================
-
-  Future<void> _handleMenuAction(
-      _SettingsMenuAction action,
-      ) async {
-    if (_isSigningOut || !_isCurrentSession) {
-      return;
-    }
+  Future<void> _menuAction(_SettingsAction action) async {
+    if (!_valid || _signingOut) return;
 
     switch (action) {
-      case _SettingsMenuAction.refresh:
+      case _SettingsAction.refresh:
         await _loadCounts();
         return;
-
-      case _SettingsMenuAction.verifyDatabase:
-        await _checkDatabaseHealth();
+      case _SettingsAction.verify:
+        await _verifyDatabase();
         return;
-
-      case _SettingsMenuAction.about:
-        _showAboutApp();
+      case _SettingsAction.about:
+        _about();
         return;
-
-      case _SettingsMenuAction.signOut:
+      case _SettingsAction.signOut:
         await _signOut();
         return;
     }
   }
 
   // ========================================
-  // SECTION HEADER
+  // REUSABLE UI
   // ========================================
 
-  Widget _buildSectionHeader(
-      String title,
-      String subtitle,
-      ) {
+  Widget _heading(String title, String subtitle) {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           title,
-
           style: const TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w700,
             color: AppColors.textPrimary,
           ),
         ),
-
-        const SizedBox(height: 6),
-
+        const SizedBox(height: 5),
         Text(
           subtitle,
-
           style: const TextStyle(
             fontSize: 13,
             height: 1.4,
@@ -819,71 +618,80 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // STATISTICS CARD
-  // ========================================
-
-  Widget _buildCountCard({
-    required String title,
-    required int? count,
+  Widget _tile({
     required IconData icon,
-    required Color color,
-    required Color lightColor,
+    required String title,
+    required String subtitle,
+    VoidCallback? onTap,
+    Color iconColor = AppColors.primary,
   }) {
     return Card(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(
-          minHeight: 145,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 15,
+          vertical: 8,
         ),
+        leading: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: AppColors.primaryLight,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(icon, color: iconColor),
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: AppColors.textPrimary,
+          ),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(
+            fontSize: 12,
+            color: AppColors.textSecondary,
+          ),
+        ),
+        trailing: onTap == null
+            ? null
+            : const Icon(Icons.chevron_right),
+        onTap: !_valid || _signingOut ? null : onTap,
+      ),
+    );
+  }
 
+  Widget _countCard(
+      String title,
+      int? count,
+      IconData icon,
+      Color color,
+      ) {
+    return Card(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 140),
         child: Padding(
           padding: const EdgeInsets.all(15),
-
           child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment:
-            CrossAxisAlignment.start,
-
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 42,
-                height: 42,
-
-                decoration: BoxDecoration(
-                  color: lightColor,
-
-                  borderRadius:
-                  BorderRadius.circular(12),
-                ),
-
-                child: Icon(
-                  icon,
-                  size: 23,
-                  color: color,
-                ),
-              ),
-
-              const SizedBox(height: 12),
-
+              Icon(icon, color: color, size: 26),
+              const SizedBox(height: 13),
               Text(
                 count?.toString() ?? '--',
-
                 style: const TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 27,
+                  fontWeight: FontWeight.bold,
                   color: AppColors.textPrimary,
                 ),
               ),
-
               const SizedBox(height: 5),
-
               Text(
                 title,
-
                 style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
                   color: AppColors.textSecondary,
+                  fontSize: 13,
                 ),
               ),
             ],
@@ -893,87 +701,52 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // RESPONSIVE STATISTICS GRID
-  // ========================================
-
-  Widget _buildCountsGrid() {
+  Widget _countsGrid() {
     return LayoutBuilder(
-      builder: (context, constraints) {
-        const spacing = 12.0;
-
-        final width = constraints.maxWidth;
-
+      builder: (context, size) {
+        final width = size.maxWidth;
         final columns = width < 310 ? 1 : 2;
-
-        final cardWidth = columns == 1
-            ? width
-            : (width - spacing) / 2;
+        final cardWidth =
+        columns == 1 ? width : (width - 12) / 2;
 
         return Wrap(
-          spacing: spacing,
-          runSpacing: spacing,
-
+          spacing: 12,
+          runSpacing: 12,
           children: [
             SizedBox(
               width: cardWidth,
-
-              child: _buildCountCard(
-                title: 'Doctors',
-                count: _counts?.doctors,
-
-                icon:
+              child: _countCard(
+                'Doctors',
+                _counts?.doctors,
                 Icons.medical_services_outlined,
-
-                color: AppColors.doctors,
-                lightColor:
-                AppColors.doctorsLight,
+                AppColors.doctors,
               ),
             ),
-
             SizedBox(
               width: cardWidth,
-
-              child: _buildCountCard(
-                title: 'Visits',
-                count: _counts?.visits,
-
-                icon:
+              child: _countCard(
+                'Visits',
+                _counts?.visits,
                 Icons.calendar_month_outlined,
-
-                color: AppColors.visits,
-                lightColor:
-                AppColors.visitsLight,
+                AppColors.visits,
               ),
             ),
-
             SizedBox(
               width: cardWidth,
-
-              child: _buildCountCard(
-                title: 'Medicines',
-                count: _counts?.medicines,
-
-                icon: Icons.medication_outlined,
-
-                color: AppColors.medicines,
-                lightColor:
-                AppColors.medicinesLight,
+              child: _countCard(
+                'Medicines',
+                _counts?.medicines,
+                Icons.medication_outlined,
+                AppColors.medicines,
               ),
             ),
-
             SizedBox(
               width: cardWidth,
-
-              child: _buildCountCard(
-                title: 'Medical Tests',
-                count: _counts?.tests,
-
-                icon: Icons.science_outlined,
-
-                color: AppColors.medicalTests,
-                lightColor:
-                AppColors.medicalTestsLight,
+              child: _countCard(
+                'Medical Tests',
+                _counts?.tests,
+                Icons.science_outlined,
+                AppColors.medicalTests,
               ),
             ),
           ],
@@ -982,299 +755,120 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // REUSABLE SETTINGS TILE
-  // ========================================
-
-  Widget _buildSettingsTile({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-
-    VoidCallback? onTap,
-
-    Color iconColor = AppColors.primary,
-    Color iconBackground =
-        AppColors.primaryLight,
-  }) {
-    return Card(
-      child: ListTile(
-        contentPadding:
-        const EdgeInsets.symmetric(
-          horizontal: 15,
-          vertical: 9,
-        ),
-
-        leading: Container(
-          width: 44,
-          height: 44,
-
-          decoration: BoxDecoration(
-            color: iconBackground,
-            borderRadius:
-            BorderRadius.circular(13),
-          ),
-
-          child: Icon(
-            icon,
-            color: iconColor,
-            size: 23,
-          ),
-        ),
-
-        title: Text(
-          title,
-
-          style: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            color: AppColors.textPrimary,
-          ),
-        ),
-
-        subtitle: Padding(
-          padding: const EdgeInsets.only(
-            top: 5,
-          ),
-
-          child: Text(
-            subtitle,
-
-            style: const TextStyle(
-              fontSize: 12,
-              height: 1.4,
-              color: AppColors.textSecondary,
-            ),
-          ),
-        ),
-
-        trailing: onTap == null
-            ? null
-            : const Icon(
-          Icons.chevron_right,
-          color: AppColors.textMuted,
-        ),
-
-        onTap: _isSigningOut ||
-            !_isCurrentSession
-            ? null
-            : onTap,
-      ),
-    );
-  }
-
-  // ========================================
-  // MEDICAL RECORDS SECTION
-  // ========================================
-
-  Widget _buildMedicalRecordsSection() {
+  Widget _medicalRecords() {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader(
+        _heading(
           'Medical records',
           'Your saved local medical information.',
         ),
-
         const SizedBox(height: 15),
-
-        if (_isLoadingCounts) ...[
+        if (_loadingCounts) ...[
           const LinearProgressIndicator(),
-          const SizedBox(height: 14),
+          const SizedBox(height: 12),
         ],
-
         if (_countsError != null) ...[
           Text(
             _countsError!,
-
-            style: const TextStyle(
-              color: AppColors.error,
-              fontSize: 13,
-            ),
+            style: const TextStyle(color: AppColors.error),
           ),
-
           const SizedBox(height: 12),
         ],
-
-        _buildCountsGrid(),
-
+        _countsGrid(),
         const SizedBox(height: 14),
-
-        _buildSettingsTile(
+        _tile(
           icon: Icons.people_outline,
-
           title: 'View Doctors',
-
-          subtitle:
-          'Open your saved doctor profiles.',
-
+          subtitle: 'Open your saved doctor profiles.',
           onTap: widget.onOpenDoctors,
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.history,
-
           title: 'Medical History',
-
-          subtitle:
-          'View your saved doctor visits.',
-
-          onTap: widget.onOpenHistory,
-
+          subtitle: 'View your saved doctor visits.',
           iconColor: AppColors.visits,
-          iconBackground:
-          AppColors.visitsLight,
+          onTap: widget.onOpenHistory,
         ),
       ],
     );
   }
 
-  // ========================================
-  // DATABASE CHECK RESULT
-  // ========================================
-
-  Widget _buildSecurityResult() {
-    if (_storageResult == null) {
-      return const SizedBox.shrink();
-    }
-
-    final passed = _storagePassed == true;
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-
-        child: Row(
-          crossAxisAlignment:
-          CrossAxisAlignment.start,
-
-          children: [
-            Icon(
-              passed
-                  ? Icons.check_circle_outline
-                  : Icons.error_outline,
-
-              color: passed
-                  ? AppColors.success
-                  : AppColors.error,
-            ),
-
-            const SizedBox(width: 12),
-
-            Expanded(
-              child: Text(
-                _storageResult!,
-
-                style: const TextStyle(
-                  fontSize: 13,
-                  height: 1.5,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ========================================
-  // PRIVACY AND SECURITY SECTION
-  // ========================================
-
-  Widget _buildPrivacySection() {
+  Widget _securitySection() {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader(
+        _heading(
           'Privacy & security',
-          'Protection of locally saved '
-              'medical records.',
+          'Check protection of your local medical records.',
         ),
-
         const SizedBox(height: 14),
-
-        _buildSettingsTile(
+        _tile(
           icon: Icons.lock_outline,
-
           title: 'Encrypted Local Database',
-
           subtitle:
-          'Medical records are stored in '
-              'a SQLCipher-encrypted database.',
-
+          'Medical records are stored using SQLCipher.',
           iconColor: AppColors.success,
-
-          iconBackground:
-          AppColors.successLight,
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.shield_outlined,
-
           title: 'Database Health Check',
-
           subtitle:
-          'Check encryption support, '
-              'relationships, and database integrity.',
+          'Check encryption and database integrity.',
         ),
-
-        const SizedBox(height: 13),
-
+        const SizedBox(height: 12),
         SizedBox(
           width: double.infinity,
-
           child: OutlinedButton.icon(
-            onPressed: _isCheckingStorage ||
-                _isSigningOut
+            onPressed: _checkingStorage || _signingOut
                 ? null
-                : _checkDatabaseHealth,
-
-            icon: _isCheckingStorage
+                : _verifyDatabase,
+            icon: _checkingStorage
                 ? const SizedBox(
               width: 18,
               height: 18,
-
-              child:
-              CircularProgressIndicator(
+              child: CircularProgressIndicator(
                 strokeWidth: 2,
               ),
             )
-                : const Icon(
-              Icons.verified_user_outlined,
-            ),
-
+                : const Icon(Icons.verified_user_outlined),
             label: Text(
-              _isCheckingStorage
+              _checkingStorage
                   ? 'Checking Database...'
                   : 'Verify Database Security',
             ),
           ),
         ),
-
-        if (_storageResult != null) ...[
-          const SizedBox(height: 13),
-          _buildSecurityResult(),
+        if (_storageMessage != null) ...[
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(15),
+              child: Row(
+                children: [
+                  Icon(
+                    _storagePassed == true
+                        ? Icons.check_circle_outline
+                        : Icons.error_outline,
+                    color: _storagePassed == true
+                        ? AppColors.success
+                        : AppColors.error,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(_storageMessage!)),
+                ],
+              ),
+            ),
+          ),
         ],
-
-        const SizedBox(height: 12),
-
+        const SizedBox(height: 10),
         const Text(
-          'A successful database check does '
-              'not replace a complete medical '
-              'data security audit.',
-
+          'A successful check does not replace '
+              'a complete medical-data security audit.',
           style: TextStyle(
             fontSize: 12,
-            height: 1.5,
             color: AppColors.textSecondary,
           ),
         ),
@@ -1282,325 +876,161 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // GOOGLE DRIVE BACKUP STATUS
-  // ========================================
-
-  Widget _buildDriveStatus() {
-    if (_driveMessage == null &&
-        !_isDriveConnected) {
-      return const SizedBox.shrink();
-    }
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-
-        child: Column(
-          crossAxisAlignment:
-          CrossAxisAlignment.start,
-
-          children: [
-            Row(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-
-              children: [
-                Icon(
-                  _isDriveConnected
-                      ? Icons.cloud_done_outlined
-                      : Icons.info_outline,
-
-                  color: _isDriveConnected
-                      ? AppColors.success
-                      : AppColors.primary,
-                ),
-
-                const SizedBox(width: 12),
-
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment:
-                    CrossAxisAlignment.start,
-
-                    children: [
-                      Text(
-                        _isDriveConnected
-                            ? 'Google Drive Connected'
-                            : 'Google Drive Status',
-
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight:
-                          FontWeight.w700,
-                          color:
-                          AppColors.textPrimary,
-                        ),
-                      ),
-
-                      const SizedBox(height: 6),
-
-                      Text(
-                        _driveMessage ?? '',
-
-                        style: const TextStyle(
-                          fontSize: 13,
-                          height: 1.5,
-                          color:
-                          AppColors.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-
-            // ==================================
-            // SHOW EXISTING BACKUP METADATA
-            // ==================================
-
-            if (_isDriveConnected &&
-                _driveFiles.isNotEmpty) ...[
-              const SizedBox(height: 15),
-
-              const Divider(),
-
-              const SizedBox(height: 10),
-
-              const Text(
-                'Backup files found',
-
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-
-              const SizedBox(height: 8),
-
-              for (final file
-              in _driveFiles.take(5))
-                ListTile(
-                  dense: true,
-
-                  contentPadding:
-                  EdgeInsets.zero,
-
-                  leading: const Icon(
-                    Icons.inventory_2_outlined,
-                    color: AppColors.primary,
-                  ),
-
-                  title: Text(
-                    file.name,
-
-                    maxLines: 2,
-
-                    overflow:
-                    TextOverflow.ellipsis,
-                  ),
-
-                  subtitle: Text(
-                    _formatBackupDate(
-                      file.modifiedAt ??
-                          file.createdAt,
-                    ),
-                  ),
-                ),
-
-              if (_driveFiles.length > 5)
-                Text(
-                  '${_driveFiles.length - 5} '
-                      'additional backup files '
-                      'were found.',
-
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color:
-                    AppColors.textSecondary,
-                  ),
-                ),
-            ],
-
-            if (_isDriveConnected) ...[
-              const SizedBox(height: 10),
-
-              const Text(
-                'Connection only. Medical '
-                    'data has not been uploaded '
-                    'or restored by this action.',
-
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.5,
-                  color: AppColors.textSecondary,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
+  String _backupDate(DateTime? date) {
+    if (date == null) return 'Unknown date';
+    final d = date.toLocal();
+    return '${d.day}/${d.month}/${d.year}';
   }
 
-  // ========================================
-  // GOOGLE DRIVE SECTION
-  // ========================================
-
-  Widget _buildGoogleDriveSection() {
+  Widget _driveSection() {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader(
+        _heading(
           'Google Drive backup',
-          'Connect private app storage '
-              'for future encrypted backups.',
+          'Private, password-encrypted backup storage.',
         ),
-
         const SizedBox(height: 14),
-
-        _buildSettingsTile(
+        _tile(
           icon: Icons.cloud_outlined,
-
           title: 'Private Google Drive Storage',
-
           subtitle:
-          'Use the Google Drive app-data '
-              'folder for encrypted backups.',
-
+          'Uses your Google Drive private app-data folder.',
           iconColor: AppColors.visits,
-
-          iconBackground:
-          AppColors.visitsLight,
         ),
-
-        const SizedBox(height: 13),
-
+        const SizedBox(height: 12),
         SizedBox(
           width: double.infinity,
-
           child: FilledButton.icon(
-            onPressed: _isConnectingDrive ||
-                _isSigningOut
+            onPressed: _driveBusy
                 ? null
-                : _connectGoogleDrive,
-
-            icon: _isConnectingDrive
+                : _driveConnected
+                ? _openBackupRestore
+                : () => _connectDrive(
+              requestPermission: true,
+            ),
+            icon: _connectingDrive
                 ? const SizedBox(
               width: 18,
               height: 18,
-
-              child:
-              CircularProgressIndicator(
+              child: CircularProgressIndicator(
                 strokeWidth: 2,
               ),
             )
                 : Icon(
-              _isDriveConnected
-                  ? Icons.refresh
+              _driveConnected
+                  ? Icons.cloud_done_outlined
                   : Icons.add_to_drive,
             ),
-
             label: Text(
-              _isConnectingDrive
-                  ? 'Connecting to Drive...'
-                  : _isDriveConnected
-                  ? 'Refresh Drive Connection'
+              _connectingDrive
+                  ? 'Checking Google Drive...'
+                  : _driveConnected
+                  ? 'Open Backup & Restore'
                   : 'Connect Google Drive',
             ),
           ),
         ),
-
-        if (_driveMessage != null ||
-            _isDriveConnected) ...[
-          const SizedBox(height: 13),
-
-          _buildDriveStatus(),
+        if (_driveMessage != null) ...[
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(15),
+              child: Row(
+                crossAxisAlignment:
+                CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    _driveConnected
+                        ? Icons.cloud_done_outlined
+                        : Icons.info_outline,
+                    color: _driveConnected
+                        ? AppColors.success
+                        : AppColors.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _driveMessage!,
+                      style: const TextStyle(height: 1.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
-
+        if (_driveConnected && _driveFiles.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (final backup in _driveFiles.take(5))
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: Text(
+                backup.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                _backupDate(
+                  backup.modifiedAt ?? backup.createdAt,
+                ),
+              ),
+            ),
+        ],
+        if (_driveConnected)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _driveBusy
+                  ? null
+                  : () => _connectDrive(
+                requestPermission: false,
+              ),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Refresh backups'),
+            ),
+          ),
         const SizedBox(height: 16),
-
-        _buildSectionHeader(
+        _heading(
           'Backup & recovery',
-          'These features will become '
-              'available after encryption '
-              'and restore verification.',
+          'Save or recover medical records using '
+              'a recovery password.',
         ),
-
         const SizedBox(height: 12),
-
-        _buildSettingsTile(
+        _tile(
           icon: Icons.cloud_upload_outlined,
-
           title: 'Back Up Medical History',
-
-          subtitle:
-          'Not available yet. A portable '
-              'encrypted backup and recovery '
-              'password are still required.',
-
+          subtitle: _driveConnected
+              ? 'Create an encrypted Google Drive backup.'
+              : 'Connect Google Drive first.',
+          onTap: _driveConnected ? _openBackupRestore : null,
           iconColor: AppColors.medicines,
-
-          iconBackground:
-          AppColors.medicinesLight,
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.restore_outlined,
-
           title: 'Restore Medical History',
-
-          subtitle:
-          'Not available yet. Restore '
-              'must be verified before any '
-              'local records are changed.',
+          subtitle: _driveConnected
+              ? 'Select a backup and enter its password.'
+              : 'Connect Google Drive first.',
+          onTap: _driveConnected ? _openBackupRestore : null,
         ),
-
-        const SizedBox(height: 14),
-
+        const SizedBox(height: 12),
         const Card(
           child: Padding(
             padding: EdgeInsets.all(15),
-
-            child: Row(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-
-              children: [
-                Icon(
-                  Icons.info_outline,
-
-                  color: AppColors.primary,
-                ),
-
-                SizedBox(width: 12),
-
-                Expanded(
-                  child: Text(
-                    'Connecting Google Drive '
-                        'does not back up your '
-                        'medical records.\n\n'
-                        'Your current records remain '
-                        'in encrypted local storage. '
-                        'Do not uninstall the app '
-                        'or clear its data expecting '
-                        'Drive recovery to work yet.',
-
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.5,
-                      color:
-                      AppColors.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
+            child: Text(
+              'Connecting Google Drive does not automatically '
+                  'upload your records.\n\n'
+                  'The current backup format does not include '
+                  'external prescription photos, PDFs, '
+                  'or medical test reports.',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: AppColors.textSecondary,
+              ),
             ),
           ),
         ),
@@ -1608,128 +1038,61 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // GOOGLE ACCOUNT SECTION
-  // ========================================
-
-  Widget _buildAccountSection() {
+  Widget _accountSection() {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader(
+        _heading(
           'Google account',
-          'Manage your signed-in '
-              'medical history account.',
+          'Manage your signed-in medical account.',
         ),
-
         const SizedBox(height: 14),
-
-        _buildSettingsTile(
+        _tile(
           icon: Icons.account_circle_outlined,
-
           title: 'Google Account',
-
           subtitle:
-          'Each signed-in Google account '
-              'uses a separate local '
-              'encrypted database.',
+          'Each Google account has a separate '
+              'encrypted medical database.',
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.security,
-
           title: 'Additional App Protection',
-
           subtitle:
-          'More privacy controls are '
-              'planned for future updates.',
-
+          'More privacy controls are planned.',
           iconColor: AppColors.medicines,
-
-          iconBackground:
-          AppColors.medicinesLight,
         ),
-
-        const SizedBox(height: 15),
-
+        const SizedBox(height: 13),
         const Card(
           child: Padding(
             padding: EdgeInsets.all(15),
-
-            child: Row(
-              crossAxisAlignment:
-              CrossAxisAlignment.start,
-
-              children: [
-                Icon(
-                  Icons.info_outline,
-                  color: AppColors.primary,
-                ),
-
-                SizedBox(width: 12),
-
-                Expanded(
-                  child: Text(
-                    'Account-specific storage '
-                        'and the visit-saving workflow '
-                        'still require full '
-                        'account-switch testing. '
-                        'Use dummy records only.',
-
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.5,
-                      color:
-                      AppColors.textSecondary,
-                    ),
-                  ),
-                ),
-              ],
+            child: Text(
+              'Account isolation and backup restoration '
+                  'still need full testing. Use dummy records.',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: AppColors.textSecondary,
+              ),
             ),
           ),
         ),
-
-        const SizedBox(height: 16),
-
-        // ==================================
-        // GOOGLE SIGN OUT BUTTON
-        // ==================================
-
+        const SizedBox(height: 14),
         SizedBox(
           width: double.infinity,
-
           child: OutlinedButton.icon(
-            onPressed: _isSigningOut ||
-                _isConnectingDrive
-                ? null
-                : _signOut,
-
-            style: OutlinedButton.styleFrom(
-              foregroundColor: AppColors.error,
-
-              side: const BorderSide(
-                color: AppColors.border,
-              ),
-            ),
-
-            icon: _isSigningOut
+            onPressed: _driveBusy ? null : _signOut,
+            icon: _signingOut
                 ? const SizedBox(
               width: 18,
               height: 18,
-
-              child:
-              CircularProgressIndicator(
+              child: CircularProgressIndicator(
                 strokeWidth: 2,
               ),
             )
                 : const Icon(Icons.logout),
-
             label: Text(
-              _isSigningOut
+              _signingOut
                   ? 'Signing Out...'
                   : 'Sign Out of Google',
             ),
@@ -1739,130 +1102,49 @@ class _SettingsScreenState
     );
   }
 
-  // ========================================
-  // ABOUT SECTION
-  // ========================================
-
-  Widget _buildAboutSection() {
+  Widget _aboutSection() {
     return Column(
-      crossAxisAlignment:
-      CrossAxisAlignment.start,
-
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader(
+        _heading(
           'About',
           'Information about this application.',
         ),
-
         const SizedBox(height: 14),
-
-        _buildSettingsTile(
-          icon:
-          Icons.health_and_safety_outlined,
-
+        _tile(
+          icon: Icons.health_and_safety_outlined,
           title: 'My Medical History',
-
-          subtitle:
-          'A personal medical '
-              'record organizer.',
-
-          onTap: _showAboutApp,
+          subtitle: 'A personal medical record organizer.',
+          onTap: _about,
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.storage_outlined,
-
           title: 'Local Medical Storage',
-
-          subtitle:
-          'Records are saved on this '
-              'device in an encrypted '
-              'local database.',
+          subtitle: 'Records are encrypted on this device.',
         ),
-
-        const SizedBox(height: 10),
-
-        _buildSettingsTile(
+        const SizedBox(height: 8),
+        _tile(
           icon: Icons.info_outline,
-
           title: 'Medical Information Notice',
-
           subtitle:
-          'The app stores your records. '
-              'It does not provide medical '
-              'advice or diagnoses.',
+          'This app stores records. '
+              'It does not provide medical diagnoses.',
         ),
       ],
     );
   }
 
-  // ========================================
-  // INVALID ACCOUNT SESSION
-  // ========================================
-
-  Widget _buildInvalidSessionScreen() {
+  Widget _invalidSessionScreen() {
     return Scaffold(
-      backgroundColor: AppColors.background,
-
-      appBar: AppBar(
-        title: const Text('Settings'),
-      ),
-
-      body: Center(
+      appBar: AppBar(title: const Text('Settings')),
+      body: const Center(
         child: Padding(
-          padding: const EdgeInsets.all(24),
-
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-
-            children: [
-              const Icon(
-                Icons.lock_outline,
-                size: 48,
-                color: AppColors.error,
-              ),
-
-              const SizedBox(height: 16),
-
-              const Text(
-                'Account Session Unavailable',
-
-                textAlign: TextAlign.center,
-
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-
-              const SizedBox(height: 12),
-
-              const Text(
-                'Your medical account changed '
-                    'or was locked. Sign in again '
-                    'to access Settings.',
-
-                textAlign: TextAlign.center,
-
-                style: TextStyle(
-                  fontSize: 14,
-                  color: AppColors.textSecondary,
-                ),
-              ),
-
-              const SizedBox(height: 20),
-
-              OutlinedButton(
-                onPressed: () {
-                  Navigator.of(context).maybePop();
-                },
-
-                child: const Text('Go Back'),
-              ),
-            ],
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'Your Google account session changed. '
+                'Sign in again to access Settings.',
+            textAlign: TextAlign.center,
           ),
         ),
       ),
@@ -1875,207 +1157,86 @@ class _SettingsScreenState
 
   @override
   Widget build(BuildContext context) {
-    if (!_isCurrentSession) {
-      return _buildInvalidSessionScreen();
+    if (!_valid) {
+      return _invalidSessionScreen();
     }
 
     return PopScope(
-      canPop:
-      !_isSigningOut &&
-          !_isConnectingDrive,
-
+      canPop: !_driveBusy,
       child: Scaffold(
         backgroundColor: AppColors.background,
-
-        // ==================================
-        // APP BAR
-        // ==================================
-
         appBar: AppBar(
           title: const Text('Settings'),
-
           actions: [
             IconButton(
               tooltip: 'Refresh record counts',
-
-              onPressed: _isLoadingCounts ||
-                  _isSigningOut
+              onPressed: _loadingCounts || _signingOut
                   ? null
                   : _loadCounts,
-
-              icon: const Icon(
-                Icons.refresh,
-              ),
+              icon: const Icon(Icons.refresh),
             ),
-
-            PopupMenuButton<_SettingsMenuAction>(
-              tooltip: 'More settings options',
-
-              enabled: !_isSigningOut &&
-                  !_isConnectingDrive,
-
-              icon: const Icon(Icons.more_vert),
-
-              onSelected: _handleMenuAction,
-
-              itemBuilder: (_) => const [
+            PopupMenuButton<_SettingsAction>(
+              tooltip: 'More options',
+              enabled: !_driveBusy,
+              onSelected: _menuAction,
+              itemBuilder: (context) => const [
                 PopupMenuItem(
-                  value:
-                  _SettingsMenuAction.refresh,
-
-                  child: Row(
-                    children: [
-                      Icon(Icons.refresh),
-                      SizedBox(width: 12),
-                      Text('Refresh data'),
-                    ],
-                  ),
+                  value: _SettingsAction.refresh,
+                  child: Text('Refresh data'),
                 ),
-
                 PopupMenuItem(
-                  value:
-                  _SettingsMenuAction
-                      .verifyDatabase,
-
-                  child: Row(
-                    children: [
-                      Icon(Icons.shield_outlined),
-                      SizedBox(width: 12),
-                      Text('Verify database'),
-                    ],
-                  ),
+                  value: _SettingsAction.verify,
+                  child: Text('Verify database'),
                 ),
-
                 PopupMenuItem(
-                  value:
-                  _SettingsMenuAction.about,
-
-                  child: Row(
-                    children: [
-                      Icon(Icons.info_outline),
-                      SizedBox(width: 12),
-                      Text('About app'),
-                    ],
-                  ),
+                  value: _SettingsAction.about,
+                  child: Text('About app'),
                 ),
-
                 PopupMenuDivider(),
-
                 PopupMenuItem(
-                  value:
-                  _SettingsMenuAction.signOut,
-
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.logout,
-                        color: AppColors.error,
-                      ),
-
-                      SizedBox(width: 12),
-
-                      Text(
-                        'Sign out',
-                        style: TextStyle(
-                          color: AppColors.error,
-                        ),
-                      ),
-                    ],
-                  ),
+                  value: _SettingsAction.signOut,
+                  child: Text('Sign out'),
                 ),
               ],
             ),
-
-            const SizedBox(width: 4),
           ],
         ),
-
-        // ==================================
-        // SETTINGS CONTENT
-        // ==================================
-
         body: SafeArea(
           child: RefreshIndicator(
             onRefresh: _loadCounts,
-
             child: ListView(
               physics:
               const AlwaysScrollableScrollPhysics(),
-
-              padding:
-              const EdgeInsets.fromLTRB(
-                18,
-                18,
-                18,
-                35,
+              padding: const EdgeInsets.fromLTRB(
+                18, 18, 18, 35,
               ),
-
               children: [
                 const Text(
                   'App settings',
-
                   style: TextStyle(
                     fontSize: 24,
                     fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary,
                   ),
                 ),
-
                 const SizedBox(height: 7),
-
                 const Text(
-                  'Manage your medical records, '
-                      'Google account, backups '
-                      'and privacy.',
-
+                  'Manage medical records, Google Drive '
+                      'backups, account and privacy.',
                   style: TextStyle(
-                    fontSize: 14,
-                    height: 1.4,
                     color: AppColors.textSecondary,
                   ),
                 ),
-
                 const SizedBox(height: 27),
-
-                // ============================
-                // MEDICAL RECORDS
-                // ============================
-
-                _buildMedicalRecordsSection(),
-
+                _medicalRecords(),
                 const SizedBox(height: 30),
-
-                // ============================
-                // LOCAL SECURITY
-                // ============================
-
-                _buildPrivacySection(),
-
+                _securitySection(),
                 const SizedBox(height: 30),
-
-                // ============================
-                // GOOGLE DRIVE
-                // ============================
-
-                _buildGoogleDriveSection(),
-
+                _driveSection(),
                 const SizedBox(height: 30),
-
-                // ============================
-                // GOOGLE ACCOUNT
-                // ============================
-
-                _buildAccountSection(),
-
+                _accountSection(),
                 const SizedBox(height: 30),
-
-                // ============================
-                // ABOUT
-                // ============================
-
-                _buildAboutSection(),
-
-                const SizedBox(height: 22),
+                _aboutSection(),
               ],
             ),
           ),
